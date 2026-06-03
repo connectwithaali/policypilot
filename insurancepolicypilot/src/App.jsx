@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from "react";
+import React, { useState, useMemo, useEffect } from "react";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const COLORS = ["#0ea5e9","#f59e0b","#10b981","#f43f5e","#8b5cf6","#ec4899"];
@@ -174,50 +174,225 @@ function PaySchedule({ vendor, color }) {
   );
 }
 
-// ── SavedQuotesTab ────────────────────────────────────────────────────────────
-function SavedQuotesTab({ savedQuotes, onLoad, onDelete, onClearAll }) {
-  const [confirmClear, setConfirmClear] = useState(false);
-  const [confirmDel, setConfirmDel]     = useState(null);
+// ── Export helpers ────────────────────────────────────────────────────────────
+function exportQuotes(savedQuotes) {
+  const payload = {
+    app: "PolicyPilot",
+    version: "1.0",
+    exportedAt: new Date().toISOString(),
+    quotes: savedQuotes,
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type:"application/json" });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement("a");
+  a.href     = url;
+  a.download = `policypilot-quotes-${new Date().toISOString().slice(0,10)}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
 
-  if (savedQuotes.length === 0) {
-    return (
-      <div>
-        <p style={S.sec}>Saved Quotes</p>
-        <div style={{ ...S.card, textAlign:"center", padding:"60px 20px" }}>
-          <div style={{ fontSize:40, marginBottom:16 }}>📋</div>
-          <div style={{ fontSize:15, color:"#475569", marginBottom:8 }}>No saved quotes yet</div>
-          <div style={{ fontSize:12, color:"#334155" }}>
-            Go to the <strong style={{ color:"#7dd3fc" }}>Comparison</strong> or{" "}
-            <strong style={{ color:"#7dd3fc" }}>Manage Vendors</strong> tab and click{" "}
-            <strong style={{ color:"#4ade80" }}>💾 Save Quote</strong> to snapshot your current data.
+function importQuotes(file, onSuccess, onError) {
+  const reader = new FileReader();
+  reader.onload = e => {
+    try {
+      const data = JSON.parse(e.target.result);
+      // Accept both wrapped {app,quotes:[]} and raw array []
+      const quotes = Array.isArray(data) ? data : (data.quotes || []);
+      if (!Array.isArray(quotes)) throw new Error("Invalid format");
+      // Basic shape check
+      quotes.forEach(q => {
+        if (!q.id || !q.label || !q.savedAt || !q.vendors || !q.current)
+          throw new Error("Malformed quote entry");
+      });
+      onSuccess(quotes);
+    } catch(err) {
+      onError(err.message || "Could not parse file");
+    }
+  };
+  reader.readAsText(file);
+}
+
+// ── Renewal History Timeline ──────────────────────────────────────────────────
+function RenewalHistory({ quotes }) {
+  // Group by renewal year
+  const byYear = {};
+  quotes.forEach(q => {
+    const yr = q.renewal ? q.renewal.slice(0,4) : "Unknown";
+    if (!byYear[yr]) byYear[yr] = [];
+    byYear[yr].push(q);
+  });
+  const years = Object.keys(byYear).sort((a,b) => b-a);
+
+  if (quotes.length < 2) return null;
+
+  // Build trend data: for each quote, best PIF total vs current total
+  const trend = [...quotes].sort((a,b) => new Date(a.savedAt)-new Date(b.savedAt)).map(q => {
+    const curT = num(q.current.autoAnnual) + num(q.current.home);
+    const best = q.vendors.length
+      ? q.vendors.reduce((a,b) => {
+          const at=(num(b.autoPIF6)*2)+num(b.home);
+          const bt=(num(a.autoPIF6)*2)+num(a.home);
+          return at<bt?b:a;
+        }, q.vendors[0])
+      : null;
+    const bestT = best ? (num(best.autoPIF6)*2)+num(best.home) : curT;
+    return { label:q.label, savedAt:q.savedAt, curT, bestT, saving:curT-bestT };
+  });
+
+  const maxVal = Math.max(...trend.map(t=>t.curT), 1);
+
+  return (
+    <div style={{ ...S.card, marginBottom:20 }}>
+      <p style={{ ...S.sec, marginBottom:16 }}>📈 Renewal History — Cost Trend</p>
+
+      {/* Timeline bars */}
+      <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+        {trend.map((t,i) => (
+          <div key={i}>
+            <div style={{ display:"flex", justifyContent:"space-between", marginBottom:4 }}>
+              <span style={{ fontSize:11, color:"#94a3b8", maxWidth:"60%", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{t.label}</span>
+              <span style={{ fontSize:10, color:"#475569" }}>{new Date(t.savedAt).toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"})}</span>
+            </div>
+            <div style={{ display:"grid", gridTemplateColumns:"1fr", gap:3 }}>
+              {/* Current policy bar */}
+              <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                <span style={{ fontSize:9, color:"#475569", width:70, textAlign:"right", flexShrink:0 }}>Current</span>
+                <div style={{ flex:1, background:"#1e293b", borderRadius:4, height:16, overflow:"hidden" }}>
+                  <div style={{ width:`${Math.round((t.curT/maxVal)*100)}%`, background:"#475569", height:"100%", borderRadius:4, display:"flex", alignItems:"center", paddingLeft:6 }}>
+                    <span style={{ fontSize:9, color:"#e2e8f0", whiteSpace:"nowrap" }}>{fmt(t.curT)}</span>
+                  </div>
+                </div>
+              </div>
+              {/* Best vendor bar */}
+              <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                <span style={{ fontSize:9, color:"#4ade80", width:70, textAlign:"right", flexShrink:0 }}>Best offer</span>
+                <div style={{ flex:1, background:"#1e293b", borderRadius:4, height:16, overflow:"hidden" }}>
+                  <div style={{ width:`${Math.round((t.bestT/maxVal)*100)}%`, background:"#166534", height:"100%", borderRadius:4, display:"flex", alignItems:"center", paddingLeft:6 }}>
+                    <span style={{ fontSize:9, color:"#4ade80", whiteSpace:"nowrap" }}>{fmt(t.bestT)}</span>
+                  </div>
+                </div>
+                {t.saving>0 && <span style={{ fontSize:10, color:"#4ade80", whiteSpace:"nowrap", flexShrink:0 }}>▼ {fmt(t.saving)}</span>}
+              </div>
+            </div>
           </div>
+        ))}
+      </div>
+
+      {/* Year group summary */}
+      <div style={{ marginTop:20, borderTop:"1px solid #1e293b", paddingTop:14 }}>
+        <p style={{ ...S.sec, marginBottom:10 }}>By Renewal Year</p>
+        <div style={{ display:"flex", gap:10, flexWrap:"wrap" }}>
+          {years.map(yr => (
+            <div key={yr} style={{ background:"#070f1e", border:"1px solid #1e293b", borderRadius:8, padding:"10px 16px" }}>
+              <div style={{ fontSize:13, fontWeight:700, color:"#7dd3fc", marginBottom:4 }}>{yr}</div>
+              <div style={{ fontSize:11, color:"#475569" }}>{byYear[yr].length} quote{byYear[yr].length!==1?"s":""} saved</div>
+            </div>
+          ))}
         </div>
       </div>
+    </div>
+  );
+}
+
+// ── SavedQuotesTab ────────────────────────────────────────────────────────────
+function SavedQuotesTab({ savedQuotes, onLoad, onDelete, onClearAll, onImport, onToast }) {
+  const [confirmClear, setConfirmClear] = useState(false);
+  const [confirmDel, setConfirmDel]     = useState(null);
+  const [importErr, setImportErr]       = useState("");
+  const [importMode, setImportMode]     = useState("merge"); // "merge" | "replace"
+  const fileRef = React.useRef();
+
+  function handleFileChange(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    setImportErr("");
+    importQuotes(
+      file,
+      (quotes) => {
+        onImport(quotes, importMode);
+        onToast(`✅ Imported ${quotes.length} quote${quotes.length!==1?"s":""} (${importMode})`);
+        e.target.value = "";
+      },
+      (err) => { setImportErr(err); e.target.value = ""; }
     );
   }
 
+  const hasQuotes = savedQuotes.length > 0;
+
   return (
     <div>
-      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:16, flexWrap:"wrap", gap:10 }}>
-        <p style={{ ...S.sec, marginBottom:0 }}>Saved Quotes ({savedQuotes.length})</p>
-        {confirmClear
-          ? <div style={{ display:"flex", gap:8, alignItems:"center" }}>
-              <span style={{ fontSize:12, color:"#f87171" }}>Delete all saved quotes?</span>
-              <button style={S.btn("red")} onClick={() => { onClearAll(); setConfirmClear(false); }}>Yes, delete all</button>
-              <button style={S.btn("")}    onClick={() => setConfirmClear(false)}>Cancel</button>
-            </div>
-          : <button style={S.btn("red")} onClick={() => setConfirmClear(true)}>🗑 Clear All</button>
-        }
+      {/* Toolbar */}
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:20, flexWrap:"wrap", gap:12 }}>
+        <p style={{ ...S.sec, marginBottom:0 }}>
+          Saved Quotes {hasQuotes ? `(${savedQuotes.length})` : ""}
+        </p>
+        <div style={{ display:"flex", gap:8, flexWrap:"wrap", alignItems:"center" }}>
+          {/* Import */}
+          <div style={{ display:"flex", gap:6, alignItems:"center", background:"#0b1628", border:"1px solid #1e3a5f", borderRadius:8, padding:"6px 10px" }}>
+            <span style={{ fontSize:10, color:"#475569", letterSpacing:1, textTransform:"uppercase" }}>Import as:</span>
+            <select value={importMode} onChange={e=>setImportMode(e.target.value)}
+              style={{ background:"#1e293b", border:"1px solid #334155", borderRadius:6, color:"#e2e8f0", fontSize:11, fontFamily:"inherit", padding:"3px 8px", cursor:"pointer" }}>
+              <option value="merge">Merge (keep existing)</option>
+              <option value="replace">Replace all</option>
+            </select>
+            <button style={{ ...S.btn("blue"), padding:"5px 12px", fontSize:11 }}
+              onClick={() => { setImportErr(""); fileRef.current.click(); }}>
+              📂 Import JSON
+            </button>
+            <input ref={fileRef} type="file" accept=".json" style={{ display:"none" }} onChange={handleFileChange} />
+          </div>
+          {/* Export */}
+          {hasQuotes && (
+            <button style={{ ...S.btn(""), padding:"7px 14px", fontSize:11, border:"1px solid #334155" }}
+              onClick={() => { exportQuotes(savedQuotes); onToast("📥 Export downloaded!"); }}>
+              📥 Export JSON
+            </button>
+          )}
+          {/* Clear all */}
+          {hasQuotes && (
+            confirmClear
+              ? <div style={{ display:"flex", gap:6, alignItems:"center" }}>
+                  <span style={{ fontSize:11, color:"#f87171" }}>Delete all?</span>
+                  <button style={{ ...S.btn("red"), padding:"5px 12px" }} onClick={() => { onClearAll(); setConfirmClear(false); }}>Yes</button>
+                  <button style={{ ...S.btn(""), padding:"5px 12px" }}    onClick={() => setConfirmClear(false)}>No</button>
+                </div>
+              : <button style={{ ...S.btn("red"), padding:"7px 14px", fontSize:11 }} onClick={() => setConfirmClear(true)}>🗑 Clear All</button>
+          )}
+        </div>
       </div>
 
+      {importErr && (
+        <div style={{ background:"#450a0a", border:"1px solid #991b1b", borderRadius:8, padding:"10px 16px", marginBottom:14, fontSize:12, color:"#f87171" }}>
+          ⚠ Import failed: {importErr}. Make sure you are importing a valid PolicyPilot JSON export file.
+        </div>
+      )}
+
+      {/* Empty state */}
+      {!hasQuotes && (
+        <div style={{ ...S.card, textAlign:"center", padding:"60px 20px" }}>
+          <div style={{ fontSize:40, marginBottom:16 }}>📋</div>
+          <div style={{ fontSize:15, color:"#475569", marginBottom:8 }}>No saved quotes yet</div>
+          <div style={{ fontSize:12, color:"#334155", lineHeight:1.8 }}>
+            Go to the <strong style={{ color:"#7dd3fc" }}>Comparison</strong> or{" "}
+            <strong style={{ color:"#7dd3fc" }}>Manage Vendors</strong> tab and click{" "}
+            <strong style={{ color:"#4ade80" }}>💾 Save Quote</strong> to snapshot your current data.
+            <br />Or use <strong style={{ color:"#3b82f6" }}>📂 Import JSON</strong> above to restore a previously exported file.
+          </div>
+        </div>
+      )}
+
+      {/* Renewal history timeline (only if 2+ quotes) */}
+      {savedQuotes.length >= 2 && <RenewalHistory quotes={savedQuotes} />}
+
+      {/* Quote cards */}
       {savedQuotes.map(q => {
         const curT = num(q.current.autoAnnual) + num(q.current.home);
         const vendorCount = q.vendors.length;
         const lowestVendor = q.vendors.length
           ? q.vendors.reduce((a,b) => {
-              const at = (num(b.autoPIF6)*2)+num(b.home);
-              const bt = (num(a.autoPIF6)*2)+num(a.home);
-              return at < bt ? b : a;
+              const at=(num(b.autoPIF6)*2)+num(b.home);
+              const bt=(num(a.autoPIF6)*2)+num(a.home);
+              return at<bt?b:a;
             }, q.vendors[0])
           : null;
         const lowestTotal = lowestVendor ? (num(lowestVendor.autoPIF6)*2)+num(lowestVendor.home) : 0;
@@ -225,35 +400,37 @@ function SavedQuotesTab({ savedQuotes, onLoad, onDelete, onClearAll }) {
 
         return (
           <div key={q.id} style={{ background:"#0b1628", border:"1px solid #1e293b", borderRadius:12, padding:"20px 22px", marginBottom:14 }}>
-            {/* Header row */}
+            {/* Header */}
             <div style={{ display:"flex", alignItems:"flex-start", justifyContent:"space-between", gap:12, flexWrap:"wrap" }}>
               <div>
                 <div style={{ fontSize:15, fontWeight:700, color:"#f8fafc", marginBottom:4 }}>{q.label}</div>
                 <div style={{ fontSize:11, color:"#475569" }}>
-                  Saved on {new Date(q.savedAt).toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric",hour:"2-digit",minute:"2-digit"})}
+                  Saved {new Date(q.savedAt).toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric",hour:"2-digit",minute:"2-digit"})}
                 </div>
                 <div style={{ fontSize:11, color:"#475569", marginTop:2 }}>
                   Renewal: <span style={{ color:"#93c5fd" }}>{new Date(q.renewal+"T12:00:00").toLocaleDateString("en-US",{month:"long",day:"numeric",year:"numeric"})}</span>
                   {" · "}{vendorCount} vendor{vendorCount!==1?"s":""}
                 </div>
               </div>
-              <div style={{ display:"flex", gap:8", flexShrink:0 }}>
+              <div style={{ display:"flex", gap:8, flexShrink:0, flexWrap:"wrap" }}>
                 {confirmDel===q.id
-                  ? <div style={{ display:"flex", gap:8, alignItems:"center" }}>
-                      <span style={{ fontSize:11, color:"#f87171" }}>Remove this quote?</span>
+                  ? <div style={{ display:"flex", gap:6, alignItems:"center" }}>
+                      <span style={{ fontSize:11, color:"#f87171" }}>Remove?</span>
                       <button style={{ ...S.btn("red"), padding:"6px 12px" }} onClick={() => { onDelete(q.id); setConfirmDel(null); }}>Yes</button>
                       <button style={{ ...S.btn(""), padding:"6px 12px" }}    onClick={() => setConfirmDel(null)}>No</button>
                     </div>
-                  : <div style={{ display:"flex", gap:8 }}>
-                      <button style={{ ...S.btn("blue"), padding:"7px 16px" }} onClick={() => onLoad(q)}>⬆ Load</button>
-                      <button style={{ ...S.btn("red"),  padding:"7px 12px" }} onClick={() => setConfirmDel(q.id)}>✕</button>
-                    </div>
+                  : <>
+                      <button style={{ ...S.btn("blue"), padding:"7px 14px", fontSize:11 }} onClick={() => onLoad(q)}>⬆ Load</button>
+                      <button style={{ ...S.btn(""), padding:"7px 12px", fontSize:11, border:"1px solid #334155" }}
+                        onClick={() => { exportQuotes([q]); onToast("📥 Quote exported!"); }}>📥</button>
+                      <button style={{ ...S.btn("red"), padding:"7px 12px", fontSize:11 }} onClick={() => setConfirmDel(q.id)}>✕</button>
+                    </>
                 }
               </div>
             </div>
 
             {/* Summary strips */}
-            <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(160px,1fr))", gap:10, marginTop:16 }}>
+            <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(150px,1fr))", gap:10, marginTop:16 }}>
               <div style={{ background:"#070f1e", border:"1px solid #1e293b", borderRadius:8, padding:"10px 14px" }}>
                 <div style={{ fontSize:9, color:"#475569", textTransform:"uppercase", letterSpacing:1, marginBottom:4 }}>Current Auto / yr</div>
                 <div style={{ fontSize:15, fontWeight:700, color:"#94a3b8" }}>{fmt(num(q.current.autoAnnual))}</div>
@@ -263,7 +440,7 @@ function SavedQuotesTab({ savedQuotes, onLoad, onDelete, onClearAll }) {
                 <div style={{ fontSize:15, fontWeight:700, color:"#94a3b8" }}>{fmt(num(q.current.home))}</div>
               </div>
               <div style={{ background:"#070f1e", border:"1px solid #1e293b", borderRadius:8, padding:"10px 14px" }}>
-                <div style={{ fontSize:9, color:"#475569", textTransform:"uppercase", letterSpacing:1, marginBottom:4 }}>Current Total / yr</div>
+                <div style={{ fontSize:9, color:"#475569", textTransform:"uppercase", letterSpacing:1, marginBottom:4 }}>Combined Total / yr</div>
                 <div style={{ fontSize:15, fontWeight:700, color:"#f8fafc" }}>{fmt(curT)}</div>
               </div>
               {lowestVendor && (
@@ -696,6 +873,19 @@ export default function App() {
     setSavedQuotes([]);
   }
 
+  function handleImportQuotes(quotes, mode) {
+    if (mode === "replace") {
+      setSavedQuotes(quotes);
+    } else {
+      // Merge: add imported quotes, skip any with duplicate ids
+      setSavedQuotes(prev => {
+        const existingIds = new Set(prev.map(q => q.id));
+        const fresh = quotes.filter(q => !existingIds.has(q.id));
+        return [...fresh, ...prev];
+      });
+    }
+  }
+
   // ── Vendor CRUD ───────────────────────────────────────────────────────────
   function handleCurrentAmount(field, val) {
     setCurrent(c => ({...c, [field]:val}));
@@ -791,7 +981,9 @@ export default function App() {
         )}
         {tab==="saved" && (
           <SavedQuotesTab savedQuotes={savedQuotes}
-            onLoad={handleLoadQuote} onDelete={handleDeleteQuote} onClearAll={handleClearAll} />
+            onLoad={handleLoadQuote} onDelete={handleDeleteQuote}
+            onClearAll={handleClearAll} onImport={handleImportQuotes}
+            onToast={setToastMsg} />
         )}
       </div>
 
